@@ -70,6 +70,47 @@ See [API Documentation](https://zca-js.tdung.com) for more details.
 
 ## Basic Usages
 
+### Injectable WebView runtime (text only)
+
+Build the browser runtime:
+
+```bash
+npm run build:runtime
+```
+
+The command creates a minified, single-line `dist/zca-runtime.js` for injection
+and `dist/zca-runtime.debug.js` for debugging. For an already authenticated
+WebView, load `https://chat.zalo.me/__zca_runtime_host__`, inject the minified
+file, then initialize and send a text message by phone number:
+
+```js
+await window.ZCA.init({ bridgeName: "YourFlutterJavaScriptChannel" });
+
+const result = await window.ZCA.sendToPhone({
+    phone: "0912345678",
+    text: "Hello from the WebView runtime",
+    deleteOnlyMe: true,
+    waitForAck: "delivered",
+});
+```
+
+`sendToPhone()` resolves the phone number to a Zalo UID, sends the text, and
+returns both `msgId` and `cliMsgId`. When `deleteOnlyMe` is enabled, it removes
+the sent message after its requested ACK only from the logged-in account's
+conversation; it does not recall the message for the recipient. The ACK mode
+can be `server`, `delivered`, or `seen`.
+
+For same-device authorization, load `window.ZCA.loginPageUrl`, reinject the
+runtime, call `prepareNativeLogin()` once, and let the native host open the
+returned `loginUrl`. Poll `checkNativeLogin()` rather than calling
+`prepareNativeLogin()` repeatedly. After confirmation, navigate the same
+WebView to `window.ZCA.hostUrl`, reinject the runtime, and call `init()`.
+
+The runtime deliberately contains no QR/password automation and does not
+bypass CAPTCHA or device verification. Opening the `zalo://` URL and returning
+to the host app are native host responsibilities. Reinject the runtime after a
+WebView navigation.
+
 ### Login
 
 ```javascript

@@ -16,6 +16,8 @@
         "build:clean": "rimraf dist",
         "build:esm": "tsc",
         "build:cjs": "rollup -c rollup.config.js",
+        "build:runtime": "npm run build:esm && rollup -c rollup.runtime.config.js",
+        "test:runtime": "npm run build:runtime && node test/runtime-smoke.mjs",
         "build": "bun run build:clean && bun run build:esm && bun run build:cjs",
         "test:feat": "bun run test/feat.ts",
         "prettier": "prettier --write .",
@@ -53,6 +55,9 @@
     },
     "devDependencies": {
         "@eslint/js": "^9.34.0",
+        "@rollup/plugin-commonjs": "^29.0.3",
+        "@rollup/plugin-node-resolve": "^16.0.3",
+        "@rollup/plugin-terser": "^0.4.4",
         "@rollup/plugin-typescript": "^12.1.0",
         "@types/bun": "^1.1.14",
         "@types/crypto-js": "^4.2.2",
