@@ -11,6 +11,15 @@ const bridgeMessages = [];
 const requests = [];
 const sockets = [];
 const socketKey = Buffer.alloc(32, 9).toString("base64");
+const officialImei = "12345678-1234-4123-8123-123456789abc-0123456789abcdef0123456789abcdef";
+const officialZcid = cryptojs.AES.encrypt(`30,${officialImei},1700000000000`, cryptojs.enc.Utf8.parse(
+    "3FC4F0D2AB50057BCE0D90D9187A22B1",
+), {
+    iv: { words: [0, 0, 0, 0], sigBytes: 16 },
+    mode: cryptojs.mode.CBC,
+    padding: cryptojs.pad.Pkcs7,
+}).ciphertext.toString(cryptojs.enc.Hex).toUpperCase();
+const localValues = new Map();
 
 class MockWebSocket {
     static CONNECTING = 0;
@@ -191,6 +200,15 @@ const context = {
     },
     navigator: { userAgent: "zca-runtime-test" },
     location: { protocol: "https:", hostname: "chat.zalo.me" },
+    performance: {
+        getEntriesByType: () => [{
+            name: `https://wpa.chat.zalo.me/api/login/getLoginInfo?zcid=${officialZcid}`,
+        }],
+    },
+    localStorage: {
+        getItem: (key) => localValues.get(key) ?? null,
+        setItem: (key, value) => localValues.set(key, String(value)),
+    },
     crypto: webcrypto,
     fetch: fetchMock,
     setTimeout,
@@ -210,7 +228,7 @@ context.window = context;
 vm.runInNewContext(bundle, context, { filename: "zca-runtime.js" });
 assert.ok(context.ZCA, "bundle must expose window.ZCA");
 assert.equal(context.ZCA.loginPageUrl, "https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me");
-assert.equal(context.ZCA.hostUrl, "https://chat.zalo.me/__zca_runtime_host__");
+assert.equal(context.ZCA.hostUrl, "https://chat.zalo.me/");
 const nativeLogin = await context.ZCA.prepareNativeLogin();
 assert.equal(nativeLogin.loginUrl, "zalo://login/?browser=chrome&token=native-token");
 assert.equal((await context.ZCA.checkNativeLogin()).logged, true);
@@ -226,11 +244,11 @@ assert.equal(
 assert.equal(requests.find(({ url }) => url.pathname.endsWith("/account/logininfo"))?.init.method, "POST");
 await context.ZCA.init({
     bridgeName: "TestBridge",
-    imei: "test-imei",
     logging: false,
     autoConnect: false,
 });
 assert.equal(context.ZCA.getState().ready, true);
+assert.equal(localValues.get("__zca_runtime_imei_v1"), officialImei);
 
 const sent = await context.ZCA.sendToPhone({
     phone: "0912345678",

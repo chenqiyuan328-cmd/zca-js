@@ -96,7 +96,9 @@ console.log(login.loginUrl);
 
 Zalo 批准后会通过 `googlechrome://navigate?url=...` 打开 Chrome。嵌入式 WebView 与 Chrome 的
 CookieStore 相互隔离，因此 Android WebView 宿主必须注册并接收这个回调，把其中经过校验的
-Zalo HTTPS `url` 加载到创建 token 的同一个 WebView。不要轮询
+Zalo HTTPS `url` 加载到创建 token 的同一个 WebView。当前 Android 回调中的 `url` 可能省略
+`https://`（例如以 `id.zalo.me/account/login/native/verify` 开头），宿主只能在严格校验 Zalo
+官方域名后补全协议。不要轮询
 `/account/login/native/check-login-status`；无参数再次调用该接口会生成替代 token。
 
 回调页面完成跳转后调用：
@@ -110,16 +112,16 @@ if (result.logged) {
 
 ### 2.5 进入消息宿主页
 
-登录成功后，让同一个 WebView 加载：
+授权回调最终进入真实的 Zalo Web 页面：
 
 ```js
 window.ZCA.hostUrl
-// https://chat.zalo.me/__zca_runtime_host__
+// https://chat.zalo.me/
 ```
 
-这个地址当前会返回 HTTP 404，这是有意使用的无脚本同源宿主页，用于避免完整 Zalo Web 页面自己建立另一条 WebSocket。宿主层不要把该地址的 404 当作登录失败，也不要自动跳转错误页。
+不要在初始化前跳转到自建的 `chat.zalo.me` 占位路径。Zalo 会把登录 Cookie 与官方网页本次使用的 IMEI 绑定；Runtime 会从真实页面的登录请求中复用该 IMEI。如果先离开真实页面，Resource Timing 会被清空，随后 `getLoginInfo` 即使携带有效 Cookie 也可能返回错误码 102。
 
-页面加载完成后，再次注入 `zca-runtime.js`。
+真实页面加载完成后，再次注入 `zca-runtime.js`，并立即初始化。
 
 ### 2.6 初始化并连接
 
@@ -510,7 +512,7 @@ try {
 3. 原生层负责处理 `zalo://`，同时处理设备未安装 Zalo 的情况。
 4. Android WebView 接入需接收 `googlechrome://navigate` 回调，并只允许其中的 Zalo HTTPS 地址。
 5. 每次页面跳转后重新注入 Runtime。
-6. 对 `hostUrl` 的预期 404 做白名单处理。
+6. 在真实 `chat.zalo.me` 页面加载完成后注入并初始化，以便复用官方 IMEI。
 7. 一个账号避免同时运行多个 Zalo Web/Runtime WebSocket。
 8. 自动任务需要在宿主层实现限速、重试、幂等、防重复发送和任务结果持久化。
 9. 遇到 CAPTCHA、设备确认或风控必须交给用户正常完成，Runtime 不会绕过。

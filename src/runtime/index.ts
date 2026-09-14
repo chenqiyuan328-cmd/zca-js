@@ -197,6 +197,14 @@ function makeUUID() {
 function makeImei() {
     const storageKey = "__zca_runtime_imei_v1";
     try {
+        // Zalo binds the login cookie to the IMEI used by its official web
+        // page. A fresh random IMEI makes getLoginInfo return error 102 even
+        // while the cookie itself is valid.
+        const officialImei = discoverOfficialImei();
+        if (officialImei) {
+            localStorage.setItem(storageKey, officialImei);
+            return officialImei;
+        }
         const saved = localStorage.getItem(storageKey);
         if (saved) return saved;
         const generated = `${makeUUID()}-${md5(navigator.userAgent)}`;
@@ -205,6 +213,34 @@ function makeImei() {
     } catch {
         return `${makeUUID()}-${md5(navigator.userAgent)}`;
     }
+}
+
+function discoverOfficialImei() {
+    try {
+        const resources = performance.getEntriesByType("resource");
+        for (let index = resources.length - 1; index >= 0; index--) {
+            const name = (resources[index] as PerformanceResourceTiming).name;
+            if (!name.includes("/api/login/getLoginInfo")) continue;
+            const zcid = new URL(name).searchParams.get("zcid");
+            if (!zcid) continue;
+            const iv = { words: [0, 0, 0, 0], sigBytes: 16 } as cryptojs.lib.WordArray;
+            const decoded = cryptojs.AES.decrypt(
+                { ciphertext: cryptojs.enc.Hex.parse(zcid) } as cryptojs.lib.CipherParams,
+                cryptojs.enc.Utf8.parse("3FC4F0D2AB50057BCE0D90D9187A22B1"),
+                { iv, mode: cryptojs.mode.CBC, padding: cryptojs.pad.Pkcs7 },
+            ).toString(cryptojs.enc.Utf8);
+            const firstComma = decoded.indexOf(",");
+            const lastComma = decoded.lastIndexOf(",");
+            if (firstComma < 1 || lastComma <= firstComma) continue;
+            const imei = decoded.slice(firstComma + 1, lastComma);
+            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{32}$/i.test(imei)) {
+                return imei;
+            }
+        }
+    } catch {
+        // Resource Timing is optional; keep the stable local fallback below.
+    }
+    return "";
 }
 
 function signKey(type: string, params: JsonMap) {
@@ -300,7 +336,7 @@ class ParamsEncryptor {
 class ZCARuntime {
     readonly version = RUNTIME_VERSION;
     readonly loginPageUrl = "https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me";
-    readonly hostUrl = "https://chat.zalo.me/__zca_runtime_host__";
+    readonly hostUrl = "https://chat.zalo.me/";
     private state: RuntimeState = "idle";
     private options: Required<Omit<RuntimeOptions, "bridgeName" | "imei">> &
         Pick<RuntimeOptions, "bridgeName" | "imei"> = {
