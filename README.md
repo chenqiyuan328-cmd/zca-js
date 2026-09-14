@@ -72,6 +72,8 @@ See [API Documentation](https://zca-js.tdung.com) for more details.
 
 ### Injectable WebView runtime (text only)
 
+中文接口与 WebView 接入说明请参阅 [`docs/ZCA_RUNTIME_API_ZH.md`](docs/ZCA_RUNTIME_API_ZH.md)。
+
 Build the browser runtime:
 
 ```bash

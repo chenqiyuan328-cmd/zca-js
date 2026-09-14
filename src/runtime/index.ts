@@ -51,6 +51,7 @@ export type ZaloUserByPhone = {
 };
 
 export type SentText = {
+    taskKey?: string;
     phone?: string;
     uid: string;
     msgId: string;
@@ -60,11 +61,30 @@ export type SentText = {
 };
 
 export type SendToPhoneOptions = {
+    taskKey?: string;
     phone: string;
     text: string;
     deleteOnlyMe?: boolean;
     waitForAck?: "server" | "delivered" | "seen";
     ackTimeoutMs?: number;
+};
+
+export type CleanupSentMessagesOptions = {
+    taskKey?: string;
+    minimumAck?: AckLevel;
+};
+
+export type CleanupSentMessagesResult = {
+    taskKey?: string;
+    attempted: number;
+    deleted: number;
+    pending: number;
+    failures: Array<{
+        msgId: string;
+        code: string;
+        message: string;
+        zaloCode?: number;
+    }>;
 };
 
 export type AckEvent = {
@@ -304,6 +324,7 @@ class ZCARuntime {
     private manuallyClosed = false;
     private nativeLogin?: NativeLoginResult & { createdAt: number };
     private ackByMessage = new Map<string, AckEvent>();
+    private sentByMessage = new Map<string, SentText>();
     private ackWaiters = new Map<
         string,
         Set<{
@@ -792,6 +813,8 @@ class ZCARuntime {
         for (const id of ids) {
             const current = this.ackByMessage.get(id);
             if (!current || current.ack <= event.ack) this.ackByMessage.set(id, event);
+            const sent = this.sentByMessage.get(id);
+            if (sent && sent.ack < event.ack) sent.ack = event.ack;
             while (this.ackByMessage.size > 2_000) {
                 const oldest = this.ackByMessage.keys().next().value as string | undefined;
                 if (!oldest) break;
@@ -907,6 +930,7 @@ class ZCARuntime {
             deletedOnlyMe: false,
             ack: 1,
         };
+        this.sentByMessage.set(result.msgId, result);
         this.emit("message_sent", result);
         return result;
     }
@@ -933,7 +957,54 @@ class ZCARuntime {
             await this.request(url, { method: "POST", body: new URLSearchParams({ params: encrypted }) }),
         );
         const result = { ...target, status: Number(response?.status ?? 0), deletedOnlyMe: true };
+        const sent = this.sentByMessage.get(String(target.msgId));
+        if (sent) sent.deletedOnlyMe = true;
         this.emit("message_deleted", result);
+        return result;
+    }
+
+    getPendingDeletes(taskKey?: string) {
+        return [...this.sentByMessage.values()]
+            .filter((sent) => !sent.deletedOnlyMe && (!taskKey || sent.taskKey === taskKey))
+            .map((sent) => ({ ...sent }));
+    }
+
+    async cleanupSentMessages(options: CleanupSentMessagesOptions = {}): Promise<CleanupSentMessagesResult> {
+        const minimumAck = options.minimumAck ?? 1;
+        const candidates = this.getPendingDeletes(options.taskKey).filter((sent) => sent.ack >= minimumAck);
+        const failures: CleanupSentMessagesResult["failures"] = [];
+        let deleted = 0;
+        for (const sent of candidates) {
+            try {
+                await this.deleteOnlyMe(sent);
+                deleted++;
+            } catch (error) {
+                const runtimeError =
+                    error instanceof ZCARuntimeError ? error : new ZCARuntimeError(String(error), "DELETE_FAILED");
+                failures.push({
+                    msgId: sent.msgId,
+                    code: runtimeError.code,
+                    message: runtimeError.message,
+                    zaloCode: runtimeError.zaloCode,
+                });
+            }
+        }
+        const result: CleanupSentMessagesResult = {
+            taskKey: options.taskKey,
+            attempted: candidates.length,
+            deleted,
+            pending: this.getPendingDeletes(options.taskKey).length,
+            failures,
+        };
+        this.emit("cleanup_complete", result);
+        return result;
+    }
+
+    async finishTask(taskKey: string) {
+        const normalizedTaskKey = taskKey.trim();
+        if (!normalizedTaskKey) throw new ZCARuntimeError("Task key is required", "INVALID_TASK_KEY");
+        const result = await this.cleanupSentMessages({ taskKey: normalizedTaskKey, minimumAck: 1 });
+        this.emit("task_cleanup_complete", result);
         return result;
     }
 
@@ -943,6 +1014,7 @@ class ZCARuntime {
             if (ackMode !== "server") await this.waitForConnection(Math.min(input.ackTimeoutMs ?? 15_000, 30_000));
             const { phone, user } = await this.findUserByPhone(input.phone);
             const sent = await this.sendText(user.uid, input.text);
+            sent.taskKey = input.taskKey?.trim() || undefined;
             sent.phone = phone;
             if (ackMode !== "server") {
                 const ack = await this.waitForAck(sent.msgId, ackMode === "seen" ? 3 : 2, input.ackTimeoutMs);
@@ -977,6 +1049,7 @@ class ZCARuntime {
         }
         this.ackWaiters.clear();
         this.ackByMessage.clear();
+        this.sentByMessage.clear();
         this.session = null;
         return this.setState("idle");
     }

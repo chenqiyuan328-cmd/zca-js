@@ -299,6 +299,23 @@ sockets[0].message(
 assert.equal((await seenWait).ack, 3);
 assert.ok(bridgeMessages.some((message) => message.event === "message_seen"));
 
+const finalCleanupMessage = await context.ZCA.sendToPhone({
+    taskKey: "task-final-cleanup",
+    phone: "0912345678",
+    text: "cleanup at task end",
+    deleteOnlyMe: false,
+    waitForAck: "server",
+});
+assert.equal(finalCleanupMessage.deletedOnlyMe, false);
+assert.equal(context.ZCA.getPendingDeletes("task-final-cleanup").length, 1);
+const finalCleanup = await context.ZCA.finishTask("task-final-cleanup");
+assert.equal(finalCleanup.attempted, 1);
+assert.equal(finalCleanup.deleted, 1);
+assert.equal(finalCleanup.pending, 0);
+assert.equal(finalCleanup.failures.length, 0);
+assert.equal(context.ZCA.getPendingDeletes("task-final-cleanup").length, 0);
+assert.ok(bridgeMessages.some((message) => message.event === "task_cleanup_complete"));
+
 context.ZCA.reset();
 context.fetch = async () => jsonResponse({ error_code: -1, error_message: "Login required", data: null });
 await assert.rejects(context.ZCA.init({ imei: "test-imei" }), (error) => error.code === "AUTH_REQUIRED");
