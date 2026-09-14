@@ -498,6 +498,38 @@ class ZCARuntime {
 
     async checkNativeLogin() {
         this.assertAllowedOrigin();
+        if (this.nativeLogin) {
+            const nativeResponse = await this.request(
+                "https://id.zalo.me/account/login/native/check-login-status",
+                {
+                    method: "POST",
+                    cache: "no-store",
+                    headers: { "X-Requested-With": "XMLHttpRequest" },
+                    body: new URLSearchParams(),
+                },
+            );
+            const nativeEnvelope = await this.readJson<ZaloEnvelope<JsonMap | null>>(nativeResponse);
+            if (nativeEnvelope.error_code !== 0) {
+                throw new ZCARuntimeError(
+                    nativeEnvelope.error_message || "Unable to check Zalo app confirmation",
+                    "NATIVE_LOGIN_CHECK_FAILED",
+                    nativeEnvelope.error_code,
+                );
+            }
+            const nativeData = nativeEnvelope.data ?? {};
+            const nativeStatus = String(nativeData.status || "unknown");
+            this.nativeLogin.status = nativeStatus;
+            if (nativeStatus === "connected") {
+                const continueUrl = new URL(this.loginPageUrl).searchParams.get("continue") || this.hostUrl;
+                const navigationUrl =
+                    String(nativeData.url || "").trim() ||
+                    `https://id.zalo.me/checksession?continue=${encodeURIComponent(continueUrl)}`;
+                this.nativeLogin = undefined;
+                const result = { logged: false, navigating: true, navigationUrl, data: nativeData };
+                this.emit("authenticating", result);
+                return result;
+            }
+        }
         const response = await this.request("https://id.zalo.me/account/logininfo", {
             method: "POST",
             cache: "no-store",

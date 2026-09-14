@@ -5,9 +5,8 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="a5f84ce7-0443-41b4-984f-09cf5238d75d" name="更改" comment="&quot;处理可注入js&quot;">
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/src/runtime/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/runtime/index.ts" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/test/runtime-smoke.mjs" beforeDir="false" afterPath="$PROJECT_DIR$/test/runtime-smoke.mjs" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -57,6 +56,7 @@
     "node.js.selected.package.eslint": "(autodetect)",
     "nodejs_package_manager_path": "npm",
     "npm.build:runtime.executor": "Run",
+    "prettierjs.PrettierConfiguration.Package": "/Users/a1-6/cc/codes/winClub/zca-js/node_modules/prettier",
     "ts.external.directory.path": "/Users/a1-6/cc/codes/winClub/zca-js/node_modules/typescript/lib",
     "vue.rearranger.settings.migration": "true"
   }

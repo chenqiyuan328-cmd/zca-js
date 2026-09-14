@@ -11,6 +11,7 @@ const bridgeMessages = [];
 const requests = [];
 const sockets = [];
 const socketKey = Buffer.alloc(32, 9).toString("base64");
+let nativeStatusCalls = 0;
 
 class MockWebSocket {
     static CONNECTING = 0;
@@ -117,6 +118,16 @@ async function fetchMock(input, init = {}) {
     const url = new URL(input);
     requests.push({ url, init });
     if (url.pathname.endsWith("/account/login/native/check-login-status")) {
+        nativeStatusCalls++;
+        if (nativeStatusCalls > 1) {
+            return jsonResponse({
+                error_code: 0,
+                data: {
+                    status: "connected",
+                    url: "https://id.zalo.me/checksession?continue=https%3A%2F%2Fchat.zalo.me",
+                },
+            });
+        }
         return jsonResponse({ error_code: 0, data: { token: "native-token", status: "unknown" } });
     }
     if (url.pathname.endsWith("/account/logininfo")) {
@@ -213,6 +224,12 @@ assert.equal(context.ZCA.loginPageUrl, "https://id.zalo.me/account?continue=http
 assert.equal(context.ZCA.hostUrl, "https://chat.zalo.me/__zca_runtime_host__");
 const nativeLogin = await context.ZCA.prepareNativeLogin();
 assert.equal(nativeLogin.loginUrl, "zalo://login/?browser=chrome&token=native-token");
+const nativeConfirmation = await context.ZCA.checkNativeLogin();
+assert.equal(nativeConfirmation.navigating, true);
+assert.equal(
+    nativeConfirmation.navigationUrl,
+    "https://id.zalo.me/checksession?continue=https%3A%2F%2Fchat.zalo.me",
+);
 assert.equal((await context.ZCA.checkNativeLogin()).logged, true);
 assert.equal(
     requests.find(({ url }) => url.pathname.endsWith("/account/login/native/check-login-status"))?.init.method,

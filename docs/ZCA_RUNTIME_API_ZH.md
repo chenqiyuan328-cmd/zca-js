@@ -100,10 +100,15 @@ console.log(login.loginUrl);
 const result = await window.ZCA.checkNativeLogin();
 if (result.logged) {
     // 登录成功，停止轮询
+} else if (result.navigating && result.navigationUrl) {
+    // Zalo App 已批准。让同一个 WebView 打开该地址以完成 Cookie 交换。
+    location.href = result.navigationUrl;
 }
 ```
 
 建议轮询间隔 1～2 秒，并设置总超时时间。不要在轮询中反复调用 `prepareNativeLogin()`，否则 token 会变化。
+`navigating` 表示 Zalo App 已确认但 Web Cookie 尚未写入；必须使用创建 token 的同一个 WebView 打开
+`navigationUrl`，不能把它交给外部浏览器。
 
 ### 2.5 进入消息宿主页
 
