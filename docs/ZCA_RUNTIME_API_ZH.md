@@ -48,6 +48,8 @@ window.ZCA.loginPageUrl
 
 ### 2.2 检查是否已经登录
 
+从 0.2.1 起，`logininfo` 和原生 token 请求均携带 `continue=https://chat.zalo.me/`，以及从官方登录脚本获取的版本 `v`。省略 `continue` 会查询普通身份登录状态，可能返回 `logged=true`，但聊天会话仍无效，导致初始化返回 102。此处的 `v` 不是聊天 API 的版本 685。
+
 ```js
 const result = await window.ZCA.checkNativeLogin();
 
@@ -57,6 +59,8 @@ if (result.logged) {
     console.log("尚未登录");
 }
 ```
+
+当 `accountLogged=true`、`requiresConfirmation=true` 时，只是账号已识别，仍需用户完成官方页面的聊天登录确认。此时 `logged=false`，宿主必须保留登录页，不得直接跳到聊天页。只有 `ZCA.init()` 完成、状态 `ready=true` 才表示会话可用；HTTP 200 或加密响应外层 `error_code=0` 都不足以判断登录成功。
 
 返回格式：
 
@@ -119,7 +123,7 @@ window.ZCA.hostUrl
 // https://chat.zalo.me/
 ```
 
-不要在初始化前跳转到自建的 `chat.zalo.me` 占位路径。Zalo 会把登录 Cookie 与官方网页本次使用的 IMEI 绑定；Runtime 会从真实页面的登录请求中复用该 IMEI。如果先离开真实页面，Resource Timing 会被清空，随后 `getLoginInfo` 即使携带有效 Cookie 也可能返回错误码 102。
+先让官方页面完成必要的登录确认和跳转。Runtime 会优先复用 `localStorage` 中的 `z_uuid` / `sh_z_uuid`；没有时使用本地生成的稳定标识。错误 102 表示登录会话被拒绝，不能仅凭该错误推断是 IMEI 不匹配。
 
 真实页面加载完成后，再次注入 `zca-runtime.js`，并立即初始化。
 

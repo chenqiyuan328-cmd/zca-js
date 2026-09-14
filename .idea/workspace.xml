@@ -4,7 +4,12 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="a5f84ce7-0443-41b4-984f-09cf5238d75d" name="更改" comment="&quot;修复可注入js&quot;" />
+    <list default="true" id="a5f84ce7-0443-41b4-984f-09cf5238d75d" name="更改" comment="&quot;修复可注入js&quot;">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/ZCA_RUNTIME_API_ZH.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/ZCA_RUNTIME_API_ZH.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/runtime/index.ts" beforeDir="false" afterPath="$PROJECT_DIR$/src/runtime/index.ts" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/test/runtime-smoke.mjs" beforeDir="false" afterPath="$PROJECT_DIR$/test/runtime-smoke.mjs" afterDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />

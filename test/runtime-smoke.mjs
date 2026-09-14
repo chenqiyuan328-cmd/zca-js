@@ -11,15 +11,9 @@ const bridgeMessages = [];
 const requests = [];
 const sockets = [];
 const socketKey = Buffer.alloc(32, 9).toString("base64");
+let requiresConfirmation = false;
 const officialImei = "12345678-1234-4123-8123-123456789abc-0123456789abcdef0123456789abcdef";
-const officialZcid = cryptojs.AES.encrypt(`30,${officialImei},1700000000000`, cryptojs.enc.Utf8.parse(
-    "3FC4F0D2AB50057BCE0D90D9187A22B1",
-), {
-    iv: { words: [0, 0, 0, 0], sigBytes: 16 },
-    mode: cryptojs.mode.CBC,
-    padding: cryptojs.pad.Pkcs7,
-}).ciphertext.toString(cryptojs.enc.Hex).toUpperCase();
-const localValues = new Map();
+const localValues = new Map([["z_uuid", officialImei]]);
 
 class MockWebSocket {
     static CONNECTING = 0;
@@ -126,10 +120,14 @@ async function fetchMock(input, init = {}) {
     const url = new URL(input);
     requests.push({ url, init });
     if (url.pathname.endsWith("/account/login/native/check-login-status")) {
+        assert.equal(init.body.get("continue"), "https://chat.zalo.me/");
+        assert.equal(init.body.get("v"), "2606161423");
         return jsonResponse({ error_code: 0, data: { token: "native-token", status: "unknown" } });
     }
     if (url.pathname.endsWith("/account/logininfo")) {
-        return jsonResponse({ error_code: 0, data: { logged: true } });
+        assert.equal(init.body.get("continue"), "https://chat.zalo.me/");
+        assert.equal(init.body.get("v"), "2606161423");
+        return jsonResponse({ error_code: 0, data: { logged: true, require_confirm_pwd: requiresConfirmation } });
     }
     if (url.pathname.endsWith("/getLoginInfo")) {
         const data = {
@@ -199,12 +197,8 @@ const context = {
         }
     },
     navigator: { userAgent: "zca-runtime-test" },
-    location: { protocol: "https:", hostname: "chat.zalo.me" },
-    performance: {
-        getEntriesByType: () => [{
-            name: `https://wpa.chat.zalo.me/api/login/getLoginInfo?zcid=${officialZcid}`,
-        }],
-    },
+    location: { protocol: "https:", hostname: "id.zalo.me" },
+    document: { scripts: [{src: "https://stc-zlogin.zdn.vn/main-2606161423.js"}] },
     localStorage: {
         getItem: (key) => localValues.get(key) ?? null,
         setItem: (key, value) => localValues.set(key, String(value)),
@@ -232,6 +226,12 @@ assert.equal(context.ZCA.hostUrl, "https://chat.zalo.me/");
 const nativeLogin = await context.ZCA.prepareNativeLogin();
 assert.equal(nativeLogin.loginUrl, "zalo://login/?browser=chrome&token=native-token");
 assert.equal((await context.ZCA.checkNativeLogin()).logged, true);
+requiresConfirmation = true;
+const incompleteLogin = await context.ZCA.checkNativeLogin();
+assert.equal(incompleteLogin.accountLogged, true);
+assert.equal(incompleteLogin.requiresConfirmation, true);
+assert.equal(incompleteLogin.logged, false, "account login must not bypass chat confirmation");
+requiresConfirmation = false;
 assert.equal(
     requests.filter(({ url }) => url.pathname.endsWith("/account/login/native/check-login-status")).length,
     1,
@@ -242,6 +242,7 @@ assert.equal(
     "POST",
 );
 assert.equal(requests.find(({ url }) => url.pathname.endsWith("/account/logininfo"))?.init.method, "POST");
+context.location.hostname = "chat.zalo.me";
 await context.ZCA.init({
     bridgeName: "TestBridge",
     logging: false,

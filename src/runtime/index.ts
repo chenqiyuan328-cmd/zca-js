@@ -2,7 +2,7 @@ import cryptojs from "crypto-js";
 import JSONBigFactory from "json-bigint";
 import pako from "pako";
 
-const RUNTIME_VERSION = "0.2.0";
+const RUNTIME_VERSION = "0.2.1";
 const DEFAULT_API_TYPE = 30;
 const DEFAULT_API_VERSION = 685;
 
@@ -197,9 +197,7 @@ function makeUUID() {
 function makeImei() {
     const storageKey = "__zca_runtime_imei_v1";
     try {
-        // Zalo binds the login cookie to the IMEI used by its official web
-        // page. A fresh random IMEI makes getLoginInfo return error 102 even
-        // while the cookie itself is valid.
+        // Reuse the official browser identity when available.
         const officialImei = discoverOfficialImei();
         if (officialImei) {
             localStorage.setItem(storageKey, officialImei);
@@ -217,28 +215,14 @@ function makeImei() {
 
 function discoverOfficialImei() {
     try {
-        const resources = performance.getEntriesByType("resource");
-        for (let index = resources.length - 1; index >= 0; index--) {
-            const name = (resources[index] as PerformanceResourceTiming).name;
-            if (!name.includes("/api/login/getLoginInfo")) continue;
-            const zcid = new URL(name).searchParams.get("zcid");
-            if (!zcid) continue;
-            const iv = { words: [0, 0, 0, 0], sigBytes: 16 } as cryptojs.lib.WordArray;
-            const decoded = cryptojs.AES.decrypt(
-                { ciphertext: cryptojs.enc.Hex.parse(zcid) } as cryptojs.lib.CipherParams,
-                cryptojs.enc.Utf8.parse("3FC4F0D2AB50057BCE0D90D9187A22B1"),
-                { iv, mode: cryptojs.mode.CBC, padding: cryptojs.pad.Pkcs7 },
-            ).toString(cryptojs.enc.Utf8);
-            const firstComma = decoded.indexOf(",");
-            const lastComma = decoded.lastIndexOf(",");
-            if (firstComma < 1 || lastComma <= firstComma) continue;
-            const imei = decoded.slice(firstComma + 1, lastComma);
-            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{32}$/i.test(imei)) {
-                return imei;
+        for (const key of ["z_uuid", "sh_z_uuid"]) {
+            const stored = localStorage.getItem(key)?.trim() || "";
+            if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{32}$/i.test(stored)) {
+                return stored;
             }
         }
     } catch {
-        // Resource Timing is optional; keep the stable local fallback below.
+        // Storage may be disabled in the host WebView.
     }
     return "";
 }
@@ -511,7 +495,7 @@ class ZCARuntime {
             method: "POST",
             cache: "no-store",
             headers: { "X-Requested-With": "XMLHttpRequest" },
-            body: new URLSearchParams(),
+            body: this.loginForm(),
         });
         const envelope = await this.readJson<ZaloEnvelope<{ token?: string; status?: string } | null>>(response);
         const token = envelope.data?.token?.trim() || "";
@@ -538,7 +522,7 @@ class ZCARuntime {
             method: "POST",
             cache: "no-store",
             headers: { "X-Requested-With": "XMLHttpRequest" },
-            body: new URLSearchParams(),
+            body: this.loginForm(),
         });
         const envelope = await this.readJson<ZaloEnvelope<JsonMap | null>>(response);
         if (envelope.error_code !== 0) {
@@ -548,11 +532,29 @@ class ZCARuntime {
                 envelope.error_code,
             );
         }
-        const logged = envelope.data?.logged === true;
-        const result = { logged, data: envelope.data ?? {} };
+        const requiresConfirmation = envelope.data?.require_confirm_pwd === true;
+        const accountLogged = envelope.data?.logged === true;
+        const logged = accountLogged && !requiresConfirmation;
+        const result = { logged, accountLogged, requiresConfirmation, data: envelope.data ?? {} };
         this.emit(logged ? "authenticated" : "auth_required", result);
         if (logged) this.nativeLogin = undefined;
         return result;
+    }
+
+    private loginForm() {
+        if (location.hostname !== "id.zalo.me") {
+            throw new ZCARuntimeError("Open the Zalo login page before requesting authorization", "LOGIN_PAGE_REQUIRED");
+        }
+        const form = new URLSearchParams({ continue: "https://chat.zalo.me/" });
+        // The version belongs to the login UI, not the chat API version 685.
+        for (const script of Array.from(document.scripts)) {
+            const match = script.src.match(/^https:\/\/stc-zlogin\.zdn\.vn\/main-([\d.]+)\.js(?:\?.*)?$/);
+            if (match) {
+                form.set("v", match[1]);
+                break;
+            }
+        }
+        return form;
     }
 
     async init(options: RuntimeOptions = {}) {
