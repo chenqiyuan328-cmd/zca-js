@@ -92,23 +92,21 @@ console.log(login.loginUrl);
 
 `loginUrl` 应交给 Android/Flutter 原生层打开。不要依赖 WebView 内的 `location.href` 唤起 Zalo。
 
-### 2.4 等待用户在 Zalo 中确认
+### 2.4 接收 Zalo 的浏览器回调
 
-应用回到前台后，定时调用：
+Zalo 批准后会通过 `googlechrome://navigate?url=...` 打开 Chrome。嵌入式 WebView 与 Chrome 的
+CookieStore 相互隔离，因此 Android WebView 宿主必须注册并接收这个回调，把其中经过校验的
+Zalo HTTPS `url` 加载到创建 token 的同一个 WebView。不要轮询
+`/account/login/native/check-login-status`；无参数再次调用该接口会生成替代 token。
+
+回调页面完成跳转后调用：
 
 ```js
 const result = await window.ZCA.checkNativeLogin();
 if (result.logged) {
-    // 登录成功，停止轮询
-} else if (result.navigating && result.navigationUrl) {
-    // Zalo App 已批准。让同一个 WebView 打开该地址以完成 Cookie 交换。
-    location.href = result.navigationUrl;
+    // 登录成功
 }
 ```
-
-建议轮询间隔 1～2 秒，并设置总超时时间。不要在轮询中反复调用 `prepareNativeLogin()`，否则 token 会变化。
-`navigating` 表示 Zalo App 已确认但 Web Cookie 尚未写入；必须使用创建 token 的同一个 WebView 打开
-`navigationUrl`，不能把它交给外部浏览器。
 
 ### 2.5 进入消息宿主页
 
@@ -510,7 +508,7 @@ try {
 1. 登录页和消息宿主页必须使用同一个 CookieStore；不要使用两个互不共享 Cookie 的 WebView。
 2. 开启 JavaScript、DOM Storage 和 Cookie，并允许第三方 Cookie（如果所用 WebView 版本需要）。
 3. 原生层负责处理 `zalo://`，同时处理设备未安装 Zalo 的情况。
-4. 应用回到前台后再轮询登录状态；设置超时并允许用户重试。
+4. Android WebView 接入需接收 `googlechrome://navigate` 回调，并只允许其中的 Zalo HTTPS 地址。
 5. 每次页面跳转后重新注入 Runtime。
 6. 对 `hostUrl` 的预期 404 做白名单处理。
 7. 一个账号避免同时运行多个 Zalo Web/Runtime WebSocket。
