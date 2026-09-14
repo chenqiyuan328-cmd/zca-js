@@ -223,6 +223,7 @@ vm.runInNewContext(bundle, context, { filename: "zca-runtime.js" });
 assert.ok(context.ZCA, "bundle must expose window.ZCA");
 assert.equal(context.ZCA.loginPageUrl, "https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me");
 assert.equal(context.ZCA.hostUrl, "https://chat.zalo.me/");
+assert.equal(context.ZCA.isolatedHostUrl, "https://chat.zalo.me/__zca_runtime_host__");
 const nativeLogin = await context.ZCA.prepareNativeLogin();
 assert.equal(nativeLogin.loginUrl, "zalo://login/?browser=chrome&token=native-token");
 assert.equal((await context.ZCA.checkNativeLogin()).logged, true);

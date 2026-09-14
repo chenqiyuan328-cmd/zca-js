@@ -2,7 +2,7 @@ import cryptojs from "crypto-js";
 import JSONBigFactory from "json-bigint";
 import pako from "pako";
 
-const RUNTIME_VERSION = "0.2.1";
+const RUNTIME_VERSION = "0.2.2";
 const DEFAULT_API_TYPE = 30;
 const DEFAULT_API_VERSION = 685;
 
@@ -321,6 +321,7 @@ class ZCARuntime {
     readonly version = RUNTIME_VERSION;
     readonly loginPageUrl = "https://id.zalo.me/account?continue=https%3A%2F%2Fchat.zalo.me";
     readonly hostUrl = "https://chat.zalo.me/";
+    readonly isolatedHostUrl = "https://chat.zalo.me/__zca_runtime_host__";
     private state: RuntimeState = "idle";
     private options: Required<Omit<RuntimeOptions, "bridgeName" | "imei">> &
         Pick<RuntimeOptions, "bridgeName" | "imei"> = {

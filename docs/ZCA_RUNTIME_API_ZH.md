@@ -125,7 +125,9 @@ window.ZCA.hostUrl
 
 先让官方页面完成必要的登录确认和跳转。Runtime 会优先复用 `localStorage` 中的 `z_uuid` / `sh_z_uuid`；没有时使用本地生成的稳定标识。错误 102 表示登录会话被拒绝，不能仅凭该错误推断是 IMEI 不匹配。
 
-真实页面加载完成后，再次注入 `zca-runtime.js`，并立即初始化。
+真实页面加载完成后，再次注入 `zca-runtime.js`，先调用 `init({autoConnect:false})` 验证 HTTP 会话。成功后，让同一个 WebView 加载 `window.ZCA.isolatedHostUrl`（`https://chat.zalo.me/__zca_runtime_host__`），再重新注入并调用 `init({autoConnect:true})`。这个同源空白页面预期返回 404，但可正常运行注入脚本；只对该精确路径允许此状态。
+
+完整 Zalo Web 页面会运行自己的 WebSocket 和重登逻辑。不要在该页面同时启动 Runtime WebSocket，否则两个客户端可能相互断开，引起反复重连、页面重载和宿主界面闪烁。独立运行页必须在官方授权及 HTTP 会话验证成功后进入；不要用它替代登录确认流程。
 
 ### 2.6 初始化并连接
 
@@ -516,7 +518,7 @@ try {
 3. 原生层负责处理 `zalo://`，同时处理设备未安装 Zalo 的情况。
 4. Android WebView 接入需接收 `googlechrome://navigate` 回调，并只允许其中的 Zalo HTTPS 地址。
 5. 每次页面跳转后重新注入 Runtime。
-6. 在真实 `chat.zalo.me` 页面加载完成后注入并初始化，以便复用官方 IMEI。
+6. 每个页面只注入、初始化一次。先在真实聊天页完成 HTTP 会话验证，再进入 `isolatedHostUrl` 启动 Runtime 连接。
 7. 一个账号避免同时运行多个 Zalo Web/Runtime WebSocket。
 8. 自动任务需要在宿主层实现限速、重试、幂等、防重复发送和任务结果持久化。
 9. 遇到 CAPTCHA、设备确认或风控必须交给用户正常完成，Runtime 不会绕过。
