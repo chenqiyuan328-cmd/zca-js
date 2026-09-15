@@ -462,12 +462,39 @@ class ZCARuntime {
         if (init.body instanceof URLSearchParams && !headers.has("Content-Type")) {
             headers.set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8");
         }
-        return fetch(url, { ...init, headers, credentials: "include" });
+        const controller = new AbortController();
+        let timedOut = false;
+        const onAbort = () => controller.abort();
+        if (init.signal?.aborted) controller.abort();
+        else init.signal?.addEventListener("abort", onAbort, { once: true });
+        const timer = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, 30_000);
+        try {
+            return await fetch(url, { ...init, headers, credentials: "include", signal: controller.signal });
+        } catch (error) {
+            if (timedOut) throw new ZCARuntimeError("Zalo request timed out", "REQUEST_TIMEOUT");
+            throw error;
+        } finally {
+            clearTimeout(timer);
+            init.signal?.removeEventListener("abort", onAbort);
+        }
     }
 
     private async readJson<T>(response: Response) {
         if (!response.ok) throw new ZCARuntimeError(`HTTP ${response.status}`, "HTTP_ERROR");
-        return (await response.json()) as T;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            return (await Promise.race([
+                response.json(),
+                new Promise<never>((_, reject) => {
+                    timer = setTimeout(() => reject(new ZCARuntimeError("Zalo response timed out", "REQUEST_TIMEOUT")), 30_000);
+                }),
+            ])) as T;
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
     }
 
     private async resolve<T>(response: Response) {
@@ -1004,22 +1031,42 @@ class ZCARuntime {
         ) {
             throw new ZCARuntimeError("Image URL is not allowed", "IMAGE_URL_NOT_ALLOWED");
         }
-        const response = await fetch(requested, { credentials: "omit", redirect: "follow", cache: "no-store" });
-        const finalURL = new URL(response.url);
-        if (
-            !response.ok ||
-            finalURL.protocol !== "https:" ||
-            finalURL.username !== "" ||
-            finalURL.password !== "" ||
-            isPrivateNetworkHost(finalURL.hostname)
-        ) {
-            throw new ZCARuntimeError("Unable to download approved image", "IMAGE_DOWNLOAD_FAILED");
+        const controller = new AbortController();
+        let timedOut = false;
+        const timer = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, 30_000);
+        let contentType: string;
+        let blob: Blob;
+        try {
+            const response = await fetch(requested, {
+                credentials: "omit",
+                redirect: "follow",
+                cache: "no-store",
+                signal: controller.signal,
+            });
+            const finalURL = new URL(response.url);
+            if (
+                !response.ok ||
+                finalURL.protocol !== "https:" ||
+                finalURL.username !== "" ||
+                finalURL.password !== "" ||
+                isPrivateNetworkHost(finalURL.hostname)
+            ) {
+                throw new ZCARuntimeError("Unable to download approved image", "IMAGE_DOWNLOAD_FAILED");
+            }
+            contentType = (response.headers.get("content-type") || "").split(";")[0].toLowerCase();
+            if (!["image/jpeg", "image/png", "image/webp"].includes(contentType)) {
+                throw new ZCARuntimeError("Unsupported image type", "INVALID_IMAGE_TYPE");
+            }
+            blob = await response.blob();
+        } catch (error) {
+            if (timedOut) throw new ZCARuntimeError("Image download timed out", "IMAGE_DOWNLOAD_TIMEOUT");
+            throw error;
+        } finally {
+            clearTimeout(timer);
         }
-        const contentType = (response.headers.get("content-type") || "").split(";")[0].toLowerCase();
-        if (!["image/jpeg", "image/png", "image/webp"].includes(contentType)) {
-            throw new ZCARuntimeError("Unsupported image type", "INVALID_IMAGE_TYPE");
-        }
-        const blob = await response.blob();
         if (blob.size === 0 || blob.size > 10 * 1024 * 1024) {
             throw new ZCARuntimeError("Image size is invalid", "INVALID_IMAGE_SIZE");
         }
