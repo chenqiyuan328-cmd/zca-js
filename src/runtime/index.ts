@@ -2,7 +2,7 @@ import cryptojs from "crypto-js";
 import JSONBigFactory from "json-bigint";
 import pako from "pako";
 
-const RUNTIME_VERSION = "0.3.0";
+const RUNTIME_VERSION = "0.3.1";
 const DEFAULT_API_TYPE = 30;
 const DEFAULT_API_VERSION = 685;
 

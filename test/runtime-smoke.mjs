@@ -220,6 +220,7 @@ const context = {
     URLSearchParams,
     Headers,
     Response,
+    AbortController,
     TextEncoder,
     TextDecoder,
     CustomEvent: class CustomEvent {
@@ -394,6 +395,24 @@ assert.equal(finalCleanup.pending, 0);
 assert.equal(finalCleanup.failures.length, 0);
 assert.equal(context.ZCA.getPendingDeletes("task-final-cleanup").length, 0);
 assert.ok(bridgeMessages.some((message) => message.event === "task_cleanup_complete"));
+
+// Network requests must abort within a bounded time. An indefinitely hung
+// lookup or image download must not hold the task sender's exclusive guard.
+const normalFetch = context.fetch;
+const normalTimeout = context.setTimeout;
+context.fetch = (_url, init) =>
+    new Promise((_, reject) => {
+        init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+context.setTimeout = (callback, milliseconds, ...args) =>
+    setTimeout(callback, milliseconds === 30_000 ? 20 : milliseconds, ...args);
+await assert.rejects(context.ZCA.findUserByPhone("0912345678"), (error) => error.code === "REQUEST_TIMEOUT");
+await assert.rejects(
+    context.ZCA.sendTaskImage("target-uid", "image timeout", "https://images.example.com/hung.png"),
+    (error) => error.code === "IMAGE_DOWNLOAD_TIMEOUT",
+);
+context.fetch = normalFetch;
+context.setTimeout = normalTimeout;
 
 context.ZCA.reset();
 context.fetch = async () => jsonResponse({ error_code: -1, error_message: "Login required", data: null });
