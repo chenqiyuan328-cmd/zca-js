@@ -379,6 +379,32 @@ sockets[0].message(
 assert.equal((await seenWait).ack, 3);
 assert.ok(bridgeMessages.some((message) => message.event === "message_seen"));
 
+const revokesBefore = bridgeMessages.filter((message) => message.event === "message_revoked").length;
+sockets[0].message(
+    socketFrame(
+        501,
+        0,
+        await encryptedSocketEvent({
+            data: {
+                msgs: [
+                    {
+                        msgId: "undo-1",
+                        uidFrom: "0",
+                        idTo: "target-uid",
+                        content: { deleteMsg: 1, globalMsgId: "67890" },
+                    },
+                    { msgId: "normal-1", content: "ordinary message" },
+                ],
+            },
+        }),
+    ),
+);
+await new Promise((resolve) => setTimeout(resolve, 0));
+const revokes = bridgeMessages.filter((message) => message.event === "message_revoked");
+assert.equal(revokes.length, revokesBefore + 1);
+assert.equal(revokes.at(-1).payload.refId, "67890");
+assert.equal(revokes.at(-1).payload.revokeMessageId, "undo-1");
+
 const finalCleanupMessage = await context.ZCA.sendToPhone({
     taskKey: "task-final-cleanup",
     phone: "0912345678",

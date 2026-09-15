@@ -354,6 +354,7 @@ class ZCARuntime {
     private lastClientId = 0;
     private connectionState: ConnectionState = "idle";
     private socket: WebSocket | null = null;
+    private localOnlyDeletes = new Set<string>();
     private socketKey?: string;
     private socketEndpointIndex = 0;
     private reconnectAttempt = 0;
@@ -859,6 +860,31 @@ class ZCARuntime {
             return;
         }
 
+        // Private-chat recall uses the same command 501 / deleteMsg envelope
+        // already decoded as `undo` by zca-js's listener. This is not the
+        // local-only /api/message/delete result emitted by deleteOnlyMe().
+        if (command === 501 && subCommand === 0) {
+            const decoded = await decodeSocketPayload(parsed, this.socketKey);
+            const data = (decoded.data || {}) as JsonMap;
+            const messages = Array.isArray(data.msgs) ? data.msgs : [];
+            for (const rawMessage of messages) {
+                if (!rawMessage || typeof rawMessage !== "object") continue;
+                const message = rawMessage as JsonMap;
+                const content = message.content;
+                if (!content || typeof content !== "object" || !("deleteMsg" in content)) continue;
+                const undo = content as JsonMap;
+                const refId = String(undo.globalMsgId || "");
+                if (!refId || this.localOnlyDeletes.has(refId)) continue;
+                this.emit("message_revoked", {
+                    refId,
+                    revokeMessageId: String(message.msgId || ""),
+                    uidFrom: String(message.uidFrom || ""),
+                    idTo: String(message.idTo || ""),
+                    revokedAt: Date.now(),
+                });
+            }
+            return;
+        }
         if (!((command === 502 || command === 522) && subCommand === 0)) return;
         const decoded = await decodeSocketPayload(parsed, this.socketKey);
         const data = (decoded.data || {}) as JsonMap;
@@ -1161,6 +1187,8 @@ class ZCARuntime {
 
     async deleteOnlyMe(target: DeleteOnlyMeTarget) {
         const session = this.requireSession();
+        const messageId = String(target.msgId);
+        this.localOnlyDeletes.add(messageId);
         const payload = {
             toid: target.uid,
             cliMsgId: this.nextClientId(),
@@ -1177,14 +1205,18 @@ class ZCARuntime {
         };
         const encrypted = encodeSessionPayload(session.secretKey, JSON.stringify(payload));
         const url = this.makeURL(`${session.services.chat[0]}/api/message/delete`);
-        const response = await this.resolve<{ status: number }>(
-            await this.request(url, { method: "POST", body: new URLSearchParams({ params: encrypted }) }),
-        );
-        const result = { ...target, status: Number(response?.status ?? 0), deletedOnlyMe: true };
-        const sent = this.sentByMessage.get(String(target.msgId));
-        if (sent) sent.deletedOnlyMe = true;
-        this.emit("message_deleted", result);
-        return result;
+        try {
+            const response = await this.resolve<{ status: number }>(
+                await this.request(url, { method: "POST", body: new URLSearchParams({ params: encrypted }) }),
+            );
+            const result = { ...target, status: Number(response?.status ?? 0), deletedOnlyMe: true };
+            const sent = this.sentByMessage.get(messageId);
+            if (sent) sent.deletedOnlyMe = true;
+            this.emit("message_deleted", result);
+            return result;
+        } finally {
+            this.localOnlyDeletes.delete(messageId);
+        }
     }
 
     getPendingDeletes(taskKey?: string) {
