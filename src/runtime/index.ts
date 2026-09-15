@@ -2,7 +2,7 @@ import cryptojs from "crypto-js";
 import JSONBigFactory from "json-bigint";
 import pako from "pako";
 
-const RUNTIME_VERSION = "0.2.2";
+const RUNTIME_VERSION = "0.3.0";
 const DEFAULT_API_TYPE = 30;
 const DEFAULT_API_VERSION = 685;
 
@@ -64,6 +64,8 @@ export type SendToPhoneOptions = {
     taskKey?: string;
     phone: string;
     text: string;
+    link?: string;
+    image?: string;
     deleteOnlyMe?: boolean;
     waitForAck?: "server" | "delivered" | "seen";
     ackTimeoutMs?: number;
@@ -192,6 +194,21 @@ function makeUUID() {
         const value = character === "x" ? random : (random & 0x3) | 0x8;
         return value.toString(16);
     });
+}
+
+function isPrivateNetworkHost(hostname: string) {
+    const host = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return (
+        host === "localhost" ||
+        host === "::1" ||
+        host.endsWith(".local") ||
+        /^127\./.test(host) ||
+        /^10\./.test(host) ||
+        /^192\.168\./.test(host) ||
+        /^169\.254\./.test(host) ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+        /^(fc|fd|fe8|fe9|fea|feb)/.test(host)
+    );
 }
 
 function makeImei() {
@@ -544,7 +561,10 @@ class ZCARuntime {
 
     private loginForm() {
         if (location.hostname !== "id.zalo.me") {
-            throw new ZCARuntimeError("Open the Zalo login page before requesting authorization", "LOGIN_PAGE_REQUIRED");
+            throw new ZCARuntimeError(
+                "Open the Zalo login page before requesting authorization",
+                "LOGIN_PAGE_REQUIRED",
+            );
         }
         const form = new URLSearchParams({ continue: "https://chat.zalo.me/" });
         // The version belongs to the login UI, not the chat API version 685.
@@ -974,6 +994,124 @@ class ZCARuntime {
         return result;
     }
 
+    private async loadTaskImage(rawURL: string) {
+        const requested = new URL(rawURL);
+        if (
+            requested.protocol !== "https:" ||
+            requested.username !== "" ||
+            requested.password !== "" ||
+            isPrivateNetworkHost(requested.hostname)
+        ) {
+            throw new ZCARuntimeError("Image URL is not allowed", "IMAGE_URL_NOT_ALLOWED");
+        }
+        const response = await fetch(requested, { credentials: "omit", redirect: "follow", cache: "no-store" });
+        const finalURL = new URL(response.url);
+        if (
+            !response.ok ||
+            finalURL.protocol !== "https:" ||
+            finalURL.username !== "" ||
+            finalURL.password !== "" ||
+            isPrivateNetworkHost(finalURL.hostname)
+        ) {
+            throw new ZCARuntimeError("Unable to download approved image", "IMAGE_DOWNLOAD_FAILED");
+        }
+        const contentType = (response.headers.get("content-type") || "").split(";")[0].toLowerCase();
+        if (!["image/jpeg", "image/png", "image/webp"].includes(contentType)) {
+            throw new ZCARuntimeError("Unsupported image type", "INVALID_IMAGE_TYPE");
+        }
+        const blob = await response.blob();
+        if (blob.size === 0 || blob.size > 10 * 1024 * 1024) {
+            throw new ZCARuntimeError("Image size is invalid", "INVALID_IMAGE_SIZE");
+        }
+        const bitmap = await createImageBitmap(blob);
+        const metadata = { width: bitmap.width, height: bitmap.height };
+        bitmap.close();
+        if (metadata.width <= 0 || metadata.height <= 0) {
+            throw new ZCARuntimeError("Invalid image metadata", "INVALID_IMAGE_TYPE");
+        }
+        const extension = contentType === "image/png" ? "png" : contentType === "image/webp" ? "webp" : "jpg";
+        return { blob, ...metadata, fileName: `task-image.${extension}` };
+    }
+
+    async sendTaskImage(uid: string, caption: string, imageURL: string): Promise<SentText> {
+        const session = this.requireSession();
+        const target = uid.trim();
+        const fileService = session.services.file?.[0];
+        if (!target) throw new ZCARuntimeError("Target UID is required", "INVALID_UID");
+        if (!fileService) throw new ZCARuntimeError("Image service is unavailable", "IMAGE_SERVICE_UNAVAILABLE");
+        const image = await this.loadTaskImage(imageURL);
+        const chunkSize = 512 * 1024;
+        const totalChunk = Math.ceil(image.blob.size / chunkSize);
+        const uploadClientId = this.nextClientId();
+        let uploaded: { photoId?: string | number; normalUrl?: string; hdUrl?: string; thumbUrl?: string } = {};
+        for (let index = 0; index < totalChunk; index++) {
+            const encrypted = encodeSessionPayload(
+                session.secretKey,
+                JSON.stringify({
+                    toid: target,
+                    totalChunk,
+                    fileName: image.fileName,
+                    clientId: uploadClientId,
+                    totalSize: image.blob.size,
+                    imei: session.imei,
+                    isE2EE: 0,
+                    jxl: 0,
+                    chunkId: index + 1,
+                }),
+            );
+            const form = new FormData();
+            form.append("chunkContent", image.blob.slice(index * chunkSize, (index + 1) * chunkSize), image.fileName);
+            uploaded = await this.resolve(
+                await this.request(
+                    this.makeURL(`${fileService}/api/message/photo_original/upload`, { type: 2, params: encrypted }),
+                    { method: "POST", body: form },
+                ),
+            );
+        }
+        if (uploaded.photoId === undefined || !uploaded.normalUrl) {
+            throw new ZCARuntimeError("Zalo did not accept the image", "INVALID_UPLOAD_RESPONSE");
+        }
+        const cliMsgId = String(this.nextClientId());
+        const encrypted = encodeSessionPayload(
+            session.secretKey,
+            JSON.stringify({
+                photoId: uploaded.photoId,
+                clientId: cliMsgId,
+                desc: caption.trim(),
+                width: image.width,
+                height: image.height,
+                toid: target,
+                rawUrl: uploaded.normalUrl,
+                hdUrl: uploaded.hdUrl || uploaded.normalUrl,
+                thumbUrl: uploaded.thumbUrl || uploaded.normalUrl,
+                normalUrl: uploaded.normalUrl,
+                hdSize: String(image.blob.size),
+                zsource: -1,
+                ttl: 0,
+                jcp: '{"convertible":"jxl"}',
+            }),
+        );
+        const response = await this.resolve<{ msgId: string | number }>(
+            await this.request(this.makeURL(`${fileService}/api/message/photo_original/send`, { nretry: 0 }), {
+                method: "POST",
+                body: new URLSearchParams({ params: encrypted }),
+            }),
+        );
+        if (response?.msgId === undefined || response?.msgId === null) {
+            throw new ZCARuntimeError("Zalo did not return a message ID", "INVALID_SEND_RESPONSE");
+        }
+        const result: SentText = {
+            uid: target,
+            msgId: String(response.msgId),
+            cliMsgId,
+            deletedOnlyMe: false,
+            ack: 1,
+        };
+        this.sentByMessage.set(result.msgId, result);
+        this.emit("message_sent", result);
+        return result;
+    }
+
     async deleteOnlyMe(target: DeleteOnlyMeTarget) {
         const session = this.requireSession();
         const payload = {
@@ -1052,7 +1190,11 @@ class ZCARuntime {
             const ackMode = input.waitForAck ?? (input.deleteOnlyMe ? "delivered" : "server");
             if (ackMode !== "server") await this.waitForConnection(Math.min(input.ackTimeoutMs ?? 15_000, 30_000));
             const { phone, user } = await this.findUserByPhone(input.phone);
-            const sent = await this.sendText(user.uid, input.text);
+            const caption = [input.text?.trim() || "", input.link?.trim() || ""].filter(Boolean).join("\n");
+            if (!caption) throw new ZCARuntimeError("Message text is required", "EMPTY_MESSAGE");
+            const sent = input.image?.trim()
+                ? await this.sendTaskImage(user.uid, caption, input.image.trim())
+                : await this.sendText(user.uid, caption);
             sent.taskKey = input.taskKey?.trim() || undefined;
             sent.phone = phone;
             if (ackMode !== "server") {

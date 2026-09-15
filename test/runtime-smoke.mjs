@@ -119,6 +119,14 @@ async function encryptedSocketEvent(value) {
 async function fetchMock(input, init = {}) {
     const url = new URL(input);
     requests.push({ url, init });
+    if (url.hostname === "images.example.com") {
+        const response = new Response(new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }), {
+            status: 200,
+            headers: { "content-type": "image/png" },
+        });
+        Object.defineProperty(response, "url", { value: url.toString() });
+        return response;
+    }
     if (url.pathname.endsWith("/account/login/native/check-login-status")) {
         assert.equal(init.body.get("continue"), "https://chat.zalo.me/");
         assert.equal(init.body.get("v"), "2606161423");
@@ -139,6 +147,7 @@ async function fetchMock(input, init = {}) {
                 zpw_service_map_v3: {
                     friend: ["https://friend.zalo.me"],
                     chat: ["https://chat-api.zalo.me"],
+                    file: ["https://file.zalo.me"],
                 },
             },
         };
@@ -172,6 +181,29 @@ async function fetchMock(input, init = {}) {
             data: encryptSession(JSON.stringify({ error_code: 0, data: { msgId: 12345 } })),
         });
     }
+    if (url.pathname.endsWith("/message/photo_original/upload")) {
+        assert.ok(init.body instanceof FormData);
+        return jsonResponse({
+            error_code: 0,
+            data: encryptSession(
+                JSON.stringify({
+                    error_code: 0,
+                    data: {
+                        photoId: "photo-1",
+                        normalUrl: "https://file.zalo.me/photo-1",
+                        hdUrl: "https://file.zalo.me/photo-1-hd",
+                        thumbUrl: "https://file.zalo.me/photo-1-thumb",
+                    },
+                }),
+            ),
+        });
+    }
+    if (url.pathname.endsWith("/message/photo_original/send")) {
+        return jsonResponse({
+            error_code: 0,
+            data: encryptSession(JSON.stringify({ error_code: 0, data: { msgId: 67890 } })),
+        });
+    }
     if (url.pathname.endsWith("/message/delete")) {
         const params = new URLSearchParams(init.body).get("params");
         assert.ok(params, "delete request must contain encrypted params");
@@ -198,7 +230,7 @@ const context = {
     },
     navigator: { userAgent: "zca-runtime-test" },
     location: { protocol: "https:", hostname: "id.zalo.me" },
-    document: { scripts: [{src: "https://stc-zlogin.zdn.vn/main-2606161423.js"}] },
+    document: { scripts: [{ src: "https://stc-zlogin.zdn.vn/main-2606161423.js" }] },
     localStorage: {
         getItem: (key) => localValues.get(key) ?? null,
         setItem: (key, value) => localValues.set(key, String(value)),
@@ -211,6 +243,8 @@ const context = {
     clearInterval,
     console,
     Blob,
+    FormData,
+    createImageBitmap: async () => ({ width: 640, height: 480, close() {} }),
     atob,
     btoa,
     WebSocket: MockWebSocket,
@@ -265,6 +299,26 @@ assert.ok(sent.cliMsgId);
 assert.equal(sent.deletedOnlyMe, true);
 assert.ok(bridgeMessages.some((message) => message.event === "task_complete"));
 assert.ok(requests.some(({ url }) => url.pathname.endsWith("/message/delete")));
+
+const imageSent = await context.ZCA.sendToPhone({
+    phone: "0912345678",
+    text: "image caption",
+    link: "https://example.com/promo",
+    image: "https://images.example.com/promo.png",
+    waitForAck: "server",
+});
+assert.equal(imageSent.msgId, "67890");
+assert.ok(requests.some(({ url }) => url.pathname.endsWith("/message/photo_original/upload")));
+assert.ok(requests.some(({ url }) => url.pathname.endsWith("/message/photo_original/send")));
+await assert.rejects(
+    context.ZCA.sendToPhone({
+        phone: "0912345678",
+        text: "blocked image",
+        image: "https://127.0.0.1/private.png",
+        waitForAck: "server",
+    }),
+    (error) => error.code === "IMAGE_URL_NOT_ALLOWED",
+);
 
 context.ZCA.startConnection();
 assert.equal(sockets.length, 1);
