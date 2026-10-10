@@ -12,6 +12,9 @@ const requests = [];
 const sockets = [];
 const socketKey = Buffer.alloc(32, 9).toString("base64");
 let requiresConfirmation = false;
+let failStage = "";
+let imageBytes = 3;
+let failImageDownload = false;
 const officialImei = "12345678-1234-4123-8123-123456789abc-0123456789abcdef0123456789abcdef";
 const localValues = new Map([["z_uuid", officialImei]]);
 
@@ -120,7 +123,8 @@ async function fetchMock(input, init = {}) {
     const url = new URL(input);
     requests.push({ url, init });
     if (url.hostname === "images.example.com") {
-        const response = new Response(new Blob([new Uint8Array([1, 2, 3])], { type: "image/png" }), {
+        if (failImageDownload) throw new Error("image network failed");
+        const response = new Response(new Blob([new Uint8Array(imageBytes)], { type: "image/png" }), {
             status: 200,
             headers: { "content-type": "image/png" },
         });
@@ -170,18 +174,21 @@ async function fetchMock(input, init = {}) {
         });
     }
     if (url.pathname.endsWith("/profile/get")) {
+        if (failStage === "lookup") return jsonResponse({ error_code: 127, error_message: "lookup rejected", data: null });
         return jsonResponse({
             error_code: 0,
             data: encryptSession(JSON.stringify({ error_code: 0, data: { uid: "target-uid" } })),
         });
     }
     if (url.pathname.endsWith("/message/sms")) {
+        if (failStage === "text-send") return jsonResponse({ error_code: 122, error_message: "send rejected", data: null });
         return jsonResponse({
             error_code: 0,
             data: encryptSession(JSON.stringify({ error_code: 0, data: { msgId: 12345 } })),
         });
     }
     if (url.pathname.endsWith("/message/photo_original/upload")) {
+        if (failStage === "image-upload") return jsonResponse({ error_code: 212, error_message: "upload rejected", data: null });
         assert.ok(init.body instanceof FormData);
         return jsonResponse({
             error_code: 0,
@@ -199,6 +206,7 @@ async function fetchMock(input, init = {}) {
         });
     }
     if (url.pathname.endsWith("/message/photo_original/send")) {
+        if (failStage === "image-send") return jsonResponse({ error_code: 127, error_message: "image send rejected", data: null });
         return jsonResponse({
             error_code: 0,
             data: encryptSession(JSON.stringify({ error_code: 0, data: { msgId: 67890 } })),
@@ -311,6 +319,72 @@ const imageSent = await context.ZCA.sendToPhone({
 assert.equal(imageSent.msgId, "67890");
 assert.ok(requests.some(({ url }) => url.pathname.endsWith("/message/photo_original/upload")));
 assert.ok(requests.some(({ url }) => url.pathname.endsWith("/message/photo_original/send")));
+// Batch cache reuses only downloaded bytes, never recipient-specific uploads.
+const imageRequestCount = () => requests.filter(({ url }) => url.hostname === "images.example.com").length;
+const uploadCount = () => requests.filter(({ url }) => url.pathname.endsWith("/photo_original/upload")).length;
+const sendImageCount = () => requests.filter(({ url }) => url.pathname.endsWith("/photo_original/send")).length;
+const cachedImage = "https://images.example.com/cached.png";
+let beforeDownloads = imageRequestCount();
+let beforeUploads = uploadCount();
+let beforeSends = sendImageCount();
+await context.ZCA.sendToPhone({ phone: "0912345678", text: "first", image: cachedImage, imageCacheKey: "batch-a", waitForAck: "server" });
+await context.ZCA.sendToPhone({ phone: "0912345679", text: "second", image: cachedImage, imageCacheKey: "batch-a", waitForAck: "server" });
+assert.equal(imageRequestCount() - beforeDownloads, 1);
+assert.equal(uploadCount() - beforeUploads, 2);
+assert.equal(sendImageCount() - beforeSends, 2);
+await context.ZCA.sendTaskImage("another-recipient", "caption", cachedImage, "batch-b");
+assert.equal(imageRequestCount() - beforeDownloads, 2, "new batches download fresh bytes");
+context.ZCA.clearTaskImageCache();
+await context.ZCA.sendTaskImage("another-recipient", "caption", cachedImage, "batch-b");
+assert.equal(imageRequestCount() - beforeDownloads, 3, "explicit cleanup releases cached bytes");
+context.ZCA.clearTaskImageCache();
+for (let n = 0; n < 5; n++) await context.ZCA.sendTaskImage("target", "caption", `https://images.example.com/${n}.png`, "lru");
+beforeDownloads = imageRequestCount();
+await context.ZCA.sendTaskImage("target", "caption", "https://images.example.com/0.png", "lru");
+assert.equal(imageRequestCount() - beforeDownloads, 1, "fifth image evicts the oldest of four");
+context.ZCA.clearTaskImageCache();
+imageBytes = 7 * 1024 * 1024;
+for (let n = 0; n < 3; n++) await context.ZCA.sendTaskImage("target", "caption", `https://images.example.com/large-${n}.png`, "bytes");
+beforeDownloads = imageRequestCount();
+await context.ZCA.sendTaskImage("target", "caption", "https://images.example.com/large-0.png", "bytes");
+assert.equal(imageRequestCount() - beforeDownloads, 1, "20 MiB budget evicts images before count limit");
+imageBytes = 3;
+context.ZCA.clearTaskImageCache();
+failImageDownload = true;
+await assert.rejects(context.ZCA.sendTaskImage("target", "caption", cachedImage, "retry"));
+failImageDownload = false;
+beforeDownloads = imageRequestCount();
+await context.ZCA.sendTaskImage("target", "caption", cachedImage, "retry");
+assert.equal(imageRequestCount() - beforeDownloads, 1, "failed downloads are never cached");
+context.ZCA.clearTaskImageCache();
+const originalCacheTimeout = context.setTimeout;
+let expireImageCache;
+context.setTimeout = (fn, ms, ...args) => {
+    if (ms === 5 * 60_000) { expireImageCache = fn; return originalCacheTimeout(() => {}, ms); }
+    return originalCacheTimeout(fn, ms, ...args);
+};
+await context.ZCA.sendTaskImage("target", "caption", cachedImage, "expiry");
+expireImageCache();
+beforeDownloads = imageRequestCount();
+await context.ZCA.sendTaskImage("target", "caption", cachedImage, "expiry");
+assert.equal(imageRequestCount() - beforeDownloads, 1, "idle expiry requires a fresh download");
+context.ZCA.clearTaskImageCache();
+context.setTimeout = originalCacheTimeout;
+
+for (const [stage, expectedCode, image] of [
+    ["lookup", "PHONE_LOOKUP_REJECTED", undefined],
+    ["text-send", "MESSAGE_SEND_REJECTED", undefined],
+    ["image-upload", "IMAGE_UPLOAD_REJECTED", "https://images.example.com/promo.png"],
+    ["image-send", "IMAGE_SEND_REJECTED", "https://images.example.com/promo.png"],
+]) {
+    failStage = stage;
+    await assert.rejects(
+        context.ZCA.sendToPhone({ phone: "0912345678", text: "stage check", image, waitForAck: "server" }),
+        (error) => error.code === expectedCode && Number.isInteger(error.zaloCode),
+        stage,
+    );
+    failStage = "";
+}
 await assert.rejects(
     context.ZCA.sendToPhone({
         phone: "0912345678",

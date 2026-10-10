@@ -2,7 +2,7 @@ import cryptojs from "crypto-js";
 import JSONBigFactory from "json-bigint";
 import pako from "pako";
 
-const RUNTIME_VERSION = "0.3.1";
+const RUNTIME_VERSION = "0.3.2";
 const DEFAULT_API_TYPE = 30;
 const DEFAULT_API_VERSION = 685;
 
@@ -61,6 +61,7 @@ export type SentText = {
 };
 
 export type SendToPhoneOptions = {
+    imageCacheKey?: string;
     taskKey?: string;
     phone: string;
     text: string;
@@ -352,6 +353,52 @@ class ZCARuntime {
     private session: RuntimeSession | null = null;
     private listeners = new Map<string, Set<(payload: unknown) => void>>();
     private lastClientId = 0;
+    private imageCacheGeneration = 0;
+    private imageCacheKey = "";
+    private imageCache = new Map<string, { blob: Blob; width: number; height: number; fileName: string }>();
+    private imageCacheBytes = 0;
+    private imageCacheTimer?: ReturnType<typeof setTimeout>;
+
+    clearTaskImageCache() {
+        this.imageCacheGeneration++;
+        clearTimeout(this.imageCacheTimer);
+        this.imageCacheTimer = undefined;
+        this.imageCache.clear();
+        this.imageCacheBytes = 0;
+        this.imageCacheKey = "";
+    }
+
+    private async cachedTaskImage(url: string, batchKey: string) {
+        if (!batchKey) return this.loadTaskImage(url);
+        if (this.imageCacheKey !== batchKey) this.clearTaskImageCache();
+        this.imageCacheKey = batchKey;
+        clearTimeout(this.imageCacheTimer);
+        this.imageCacheTimer = setTimeout(() => this.clearTaskImageCache(), 5 * 60_000);
+        const cached = this.imageCache.get(url);
+        if (cached) {
+            this.imageCache.delete(url);
+            this.imageCache.set(url, cached);
+            return cached;
+        }
+        const generation = this.imageCacheGeneration;
+        const image = await this.loadTaskImage(url);
+        // A completed download must not repopulate a cleared/switched batch.
+        if (this.imageCacheKey !== batchKey || this.imageCacheGeneration !== generation) return image;
+        const previous = this.imageCache.get(url);
+        if (previous) {
+            this.imageCacheBytes -= previous.blob.size;
+            this.imageCache.delete(url);
+        }
+        while (this.imageCache.size >= 4 || this.imageCacheBytes + image.blob.size > 20 * 1024 * 1024) {
+            const oldest = this.imageCache.keys().next().value;
+            if (oldest === undefined) break;
+            this.imageCacheBytes -= this.imageCache.get(oldest)!.blob.size;
+            this.imageCache.delete(oldest);
+        }
+        this.imageCache.set(url, image);
+        this.imageCacheBytes += image.blob.size;
+        return image;
+    }
     private connectionState: ConnectionState = "idle";
     private socket: WebSocket | null = null;
     private localOnlyDeletes = new Set<string>();
@@ -607,6 +654,7 @@ class ZCARuntime {
     }
 
     async init(options: RuntimeOptions = {}) {
+        this.clearTaskImageCache();
         if (this.socket || this.reconnectTimer) this.stopConnection();
         this.configure(options);
         this.assertAllowedOrigin();
@@ -1009,6 +1057,11 @@ class ZCARuntime {
             if (error instanceof ZCARuntimeError && error.zaloCode === 216) {
                 throw new ZCARuntimeError("Phone number was not found on Zalo", "PHONE_NOT_FOUND", 216);
             }
+            if (error instanceof ZCARuntimeError && error.code === "ZALO_ERROR") {
+                // This endpoint runs before any message-send request. A
+                // rejection here is a definite non-send, not an unknown ACK.
+                throw new ZCARuntimeError(error.message, "PHONE_LOOKUP_REJECTED", error.zaloCode);
+            }
             throw error;
         }
     }
@@ -1029,9 +1082,17 @@ class ZCARuntime {
         };
         const encrypted = encodeSessionPayload(session.secretKey, JSON.stringify(payload));
         const url = this.makeURL(`${session.services.chat[0]}/api/message/sms`, { nretry: 0 });
-        const response = await this.resolve<{ msgId: string | number }>(
-            await this.request(url, { method: "POST", body: new URLSearchParams({ params: encrypted }) }),
-        );
+        let response: { msgId: string | number };
+        try {
+            response = await this.resolve<{ msgId: string | number }>(
+                await this.request(url, { method: "POST", body: new URLSearchParams({ params: encrypted }) }),
+            );
+        } catch (error) {
+            if (error instanceof ZCARuntimeError && error.code === "ZALO_ERROR") {
+                throw new ZCARuntimeError(error.message, "MESSAGE_SEND_REJECTED", error.zaloCode);
+            }
+            throw error;
+        }
         if (response?.msgId === undefined || response?.msgId === null) {
             throw new ZCARuntimeError("Zalo did not return a message ID", "INVALID_SEND_RESPONSE");
         }
@@ -1106,13 +1167,13 @@ class ZCARuntime {
         return { blob, ...metadata, fileName: `task-image.${extension}` };
     }
 
-    async sendTaskImage(uid: string, caption: string, imageURL: string): Promise<SentText> {
+    async sendTaskImage(uid: string, caption: string, imageURL: string, batchKey = ""): Promise<SentText> {
         const session = this.requireSession();
         const target = uid.trim();
         const fileService = session.services.file?.[0];
         if (!target) throw new ZCARuntimeError("Target UID is required", "INVALID_UID");
         if (!fileService) throw new ZCARuntimeError("Image service is unavailable", "IMAGE_SERVICE_UNAVAILABLE");
-        const image = await this.loadTaskImage(imageURL);
+        const image = await this.cachedTaskImage(imageURL, batchKey);
         const chunkSize = 512 * 1024;
         const totalChunk = Math.ceil(image.blob.size / chunkSize);
         const uploadClientId = this.nextClientId();
@@ -1134,12 +1195,22 @@ class ZCARuntime {
             );
             const form = new FormData();
             form.append("chunkContent", image.blob.slice(index * chunkSize, (index + 1) * chunkSize), image.fileName);
-            uploaded = await this.resolve(
-                await this.request(
-                    this.makeURL(`${fileService}/api/message/photo_original/upload`, { type: 2, params: encrypted }),
-                    { method: "POST", body: form },
-                ),
-            );
+            try {
+                uploaded = await this.resolve(
+                    await this.request(
+                        this.makeURL(`${fileService}/api/message/photo_original/upload`, { type: 2, params: encrypted }),
+                        { method: "POST", body: form },
+                    ),
+                );
+            } catch (error) {
+                if (error instanceof ZCARuntimeError && error.code === "ZALO_ERROR") {
+                    throw new ZCARuntimeError(error.message, "IMAGE_UPLOAD_REJECTED", error.zaloCode);
+                }
+                if (error instanceof ZCARuntimeError && error.code === "REQUEST_TIMEOUT") {
+                    throw new ZCARuntimeError(error.message, "IMAGE_UPLOAD_TIMEOUT", error.zaloCode);
+                }
+                throw new ZCARuntimeError("Image upload failed before sending", "IMAGE_UPLOAD_FAILED");
+            }
         }
         if (uploaded.photoId === undefined || !uploaded.normalUrl) {
             throw new ZCARuntimeError("Zalo did not accept the image", "INVALID_UPLOAD_RESPONSE");
@@ -1164,12 +1235,20 @@ class ZCARuntime {
                 jcp: '{"convertible":"jxl"}',
             }),
         );
-        const response = await this.resolve<{ msgId: string | number }>(
-            await this.request(this.makeURL(`${fileService}/api/message/photo_original/send`, { nretry: 0 }), {
-                method: "POST",
-                body: new URLSearchParams({ params: encrypted }),
-            }),
-        );
+        let response: { msgId: string | number };
+        try {
+            response = await this.resolve<{ msgId: string | number }>(
+                await this.request(this.makeURL(`${fileService}/api/message/photo_original/send`, { nretry: 0 }), {
+                    method: "POST",
+                    body: new URLSearchParams({ params: encrypted }),
+                }),
+            );
+        } catch (error) {
+            if (error instanceof ZCARuntimeError && error.code === "ZALO_ERROR") {
+                throw new ZCARuntimeError(error.message, "IMAGE_SEND_REJECTED", error.zaloCode);
+            }
+            throw error;
+        }
         if (response?.msgId === undefined || response?.msgId === null) {
             throw new ZCARuntimeError("Zalo did not return a message ID", "INVALID_SEND_RESPONSE");
         }
@@ -1272,13 +1351,18 @@ class ZCARuntime {
             const caption = [input.text?.trim() || "", input.link?.trim() || ""].filter(Boolean).join("\n");
             if (!caption) throw new ZCARuntimeError("Message text is required", "EMPTY_MESSAGE");
             const sent = input.image?.trim()
-                ? await this.sendTaskImage(user.uid, caption, input.image.trim())
+                ? await this.sendTaskImage(user.uid, caption, input.image.trim(), input.imageCacheKey?.trim() || "")
                 : await this.sendText(user.uid, caption);
             sent.taskKey = input.taskKey?.trim() || undefined;
             sent.phone = phone;
             if (ackMode !== "server") {
                 const ack = await this.waitForAck(sent.msgId, ackMode === "seen" ? 3 : 2, input.ackTimeoutMs);
                 sent.ack = ack.ack;
+            } else if (sent.taskKey) {
+                // Do not hold up the next recipient for ACK 2. Observe it in
+                // the background solely to distinguish a late receipt from
+                // a confirmed request failure; waitForAck emits ack_timeout.
+                void this.waitForAck(sent.msgId, 2, input.ackTimeoutMs ?? 60_000).catch(() => undefined);
             }
             if (input.deleteOnlyMe) {
                 await this.deleteOnlyMe(sent);
@@ -1300,6 +1384,7 @@ class ZCARuntime {
     }
 
     reset() {
+        this.clearTaskImageCache();
         this.stopConnection();
         for (const waiters of this.ackWaiters.values()) {
             for (const waiter of waiters) {
